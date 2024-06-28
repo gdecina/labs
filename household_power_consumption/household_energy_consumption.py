@@ -87,21 +87,19 @@ class EnergyConsumptionModel(nn.Module):
     def __init__(self, input_dim):
         super(EnergyConsumptionModel, self).__init__()
         self.fc0 = nn.Linear(input_dim, 100)
-        self.bn0 = nn.BatchNorm1d(100)
         self.fc1 = nn.Linear(100, 50)
-        self.bn1_linear = nn.BatchNorm1d(50)
-        self.dropout = nn.Dropout(0.25)
         self.lstm1 = nn.LSTM(50, 50, batch_first=True)
-        self.bn1_lstm = nn.BatchNorm1d(50)
         self.dropout = nn.Dropout(0.25)
+        self.bn = nn.BatchNorm1d(50)
         self.fc2 = nn.Linear(50, 25)
-        self.bn2 = nn.BatchNorm1d(25)
         self.fc3 = nn.Linear(25, 1)
     def forward(self, x):
         x = F.relu(self.fc0(x))
         x = F.relu(self.fc1(x))
         lstm_out, _ = self.lstm1(x)
-        lstm_out = lstm_out[:, -1, :]
+        lstm_out = lstm_out[:, -1, :] # Output extraction from LSTM layer
+        lstm_out = self.dropout(lstm_out)
+        lstm_out = self.bn(lstm_out)
         x = F.relu(self.fc2(lstm_out))
         out = self.fc3(x)
         return out
