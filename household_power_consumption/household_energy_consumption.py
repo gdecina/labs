@@ -10,6 +10,9 @@ from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error
 
+# Initializing Metal backend
+device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+
 # Importing dataset
 # Data available here : https://archive.ics.uci.edu/dataset/235/individual+household+electric+power+consumption
 household_power_consumption = pd.read_csv(
@@ -68,10 +71,10 @@ X_train, y_train = create_sequences(household_pc_scaled.drop(household_pc_valida
 X_test, y_test = create_sequences(household_pc_validation, seq_n)
 
 # Converting data to PyTorch tensors
-X_train_tensors = torch.tensor(X_train, dtype=torch.float32)
-y_train_tensors = torch.tensor(y_train, dtype=torch.float32)
-X_test_tensors = torch.tensor(X_test, dtype=torch.float32)
-y_test_tensors = torch.tensor(y_test, dtype=torch.float32)
+X_train_tensors = torch.tensor(X_train, dtype=torch.float32).to(device)
+y_train_tensors = torch.tensor(y_train, dtype=torch.float32).to(device)
+X_test_tensors = torch.tensor(X_test, dtype=torch.float32).to(device)
+y_test_tensors = torch.tensor(y_test, dtype=torch.float32).to(device)
 
 # Creating data loaders
 hh_pc_train = TensorDataset(X_train_tensors, y_train_tensors)
@@ -83,18 +86,28 @@ test_loader = DataLoader(hh_pc_test, batch_size=64, shuffle=False)
 class EnergyConsumptionModel(nn.Module):
     def __init__(self, input_dim):
         super(EnergyConsumptionModel, self).__init__()
-        self.fc0 = nn.Linear(input_dim, 50)
+        self.fc0 = nn.Linear(input_dim, 100)
+        self.bn0 = nn.BatchNorm1d(100)
+        self.fc1 = nn.Linear(100, 50)
+        self.bn1_linear = nn.BatchNorm1d(50)
+        self.dropout = nn.Dropout(0.25)
         self.lstm1 = nn.LSTM(50, 50, batch_first=True)
-        self.fc2 = nn.Linear(50, 1)
+        self.bn1_lstm = nn.BatchNorm1d(50)
+        self.dropout = nn.Dropout(0.25)
+        self.fc2 = nn.Linear(50, 25)
+        self.bn2 = nn.BatchNorm1d(25)
+        self.fc3 = nn.Linear(25, 1)
     def forward(self, x):
         x = F.relu(self.fc0(x))
+        x = F.relu(self.fc1(x))
         lstm_out, _ = self.lstm1(x)
         lstm_out = lstm_out[:, -1, :]
-        out = self.fc2(lstm_out)
+        x = F.relu(self.fc2(lstm_out))
+        out = self.fc3(x)
         return out
 
 # Initialization
-model = EnergyConsumptionModel(X_train.shape[2])
+model = EnergyConsumptionModel(X_train.shape[2]).to(device)
 criterion = nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 scheduler = ReduceLROnPlateau(optimizer, "min", factor=0.1, patience=5)
