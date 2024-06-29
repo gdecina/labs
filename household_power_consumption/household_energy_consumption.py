@@ -93,6 +93,7 @@ class EnergyConsumptionModel(nn.Module):
         self.bn = nn.BatchNorm1d(50)
         self.fc2 = nn.Linear(50, 25)
         self.fc3 = nn.Linear(25, 1)
+
     def forward(self, x):
         x = F.relu(self.fc0(x))
         x = F.relu(self.fc1(x))
@@ -140,17 +141,46 @@ def evaluate_model(model, test_loader):
     predictions = np.concatenate(predictions)
     actuals = np.concatenate(actuals)
     mse = mean_squared_error(actuals, predictions)
-    print(f'Test MSE: {mse}')
+    print(f"Test MSE: {mse}")
     return actuals, predictions, mse
 
 actuals, predictions, mse = evaluate_model(model, test_loader)
 
-# Graphing the results
-plt.figure(figsize=(15, 6))
-plt.plot(actuals, label="Actuals")
-plt.plot(predictions, label="Predictions")
+# Preparing the data for graphing
+delta = predictions - actuals
+x_start = 300_000
+x_end = 400_000
+delta_slice = delta[x_start:x_end]
+actuals_slice = actuals[x_start:x_end]
+positive_delta = np.maximum(delta_slice, 0)
+negative_delta = np.minimum(delta_slice, 0)
+x_values = range(x_start, x_end)
+
+# Grouping data in chunks
+chunk_size = 240
+num_chunks = len(delta_slice) // chunk_size
+averaged_actuals = [np.mean(actuals_slice[i * chunk_size:(i+1) * chunk_size]) for i in range(num_chunks)]
+averaged_deltas = [np.mean(delta_slice[i*chunk_size:(i+1)*chunk_size]) for i in range(num_chunks)]
+averaged_positive_deltas = [np.mean(positive_delta[i * chunk_size:(i+1) * chunk_size]) for i in range(num_chunks)]
+averaged_negative_deltas = [np.mean(negative_delta[i * chunk_size:(i+1) * chunk_size]) for i in range(num_chunks)]
+x_values = range(x_start, x_start + num_chunks * chunk_size, chunk_size)
+
+# Stacked barplot: Actuals +- Delta
+plt.figure(figsize=(35, 6))
+plt.bar(x_values, averaged_actuals, width = chunk_size, align="edge", label = f"Delta (averaged over {chunk_size} minutes)", color = "dodgerblue")
+plt.bar(x_values, averaged_positive_deltas, width = chunk_size, align="edge", bottom = averaged_actuals, label = "Positive Delta", color = "orange")
+plt.bar(x_values, averaged_negative_deltas, width=chunk_size, align="edge", bottom=np.array(averaged_actuals) + np.array(averaged_positive_deltas), label="Negative Delta", color="red")
 plt.legend()
 plt.title("Energy Consumption Forecasting")
-plt.xlabel("Time")
-plt.ylabel("Energy Consumption")
+plt.xlabel("Time (in minutes)")
+plt.ylabel("Delta in Energy Consumption")
+plt.savefig("nn_loss.png")
+
+# Barplot: Delta
+plt.figure(figsize=(35, 6))
+plt.bar(x_values, averaged_deltas, width=chunk_size, align="edge", label=f"Delta (averaged over {chunk_size} minutes)")
+plt.legend()
+plt.title("Energy Consumption Forecasting")
+plt.xlabel("Time (in minutes)")
+plt.ylabel("Delta in Energy Consumption")
 plt.savefig("nn_loss.png")
