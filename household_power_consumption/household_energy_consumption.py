@@ -135,8 +135,8 @@ def evaluate_model(model, test_loader):
     with torch.no_grad():
         for X_batch, y_batch in test_loader:
             outputs = model(X_batch)
-            predictions.append(outputs.squeeze().numpy())
-            actuals.append(y_batch.numpy())
+            predictions.append(outputs.squeeze().cpu().numpy())
+            actuals.append(y_batch.cpu().numpy())
     predictions = np.concatenate(predictions)
     actuals = np.concatenate(actuals)
     mse = mean_squared_error(actuals, predictions)
