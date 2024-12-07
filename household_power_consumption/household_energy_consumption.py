@@ -4,47 +4,73 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import joblib
+import mlflow
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_squared_error
 
-# Initializing Metal backend
-device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+def main():
+    global device
+    device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu') # Using acceleration on Mac
+    mlflow.set_tracking_uri('http://127.0.0.1:5000')
+    mlflow.set_experiment('household-energy-consumption')
+    with mlflow.start_run():
+        lr = 0.01
+        mlflow.log_metric('lr', lr)
+    
+        training, validation = load_dataset('household_power_consumption.txt')
+        seq_n = 24
+        X_train, y_train = create_sequences(training, seq_n)
+        X_test, y_test = create_sequences(validation, seq_n)
+        global train_loader, test_loader
+        train_loader, test_loader = create_data_loaders(X_train, y_train, X_test, y_test)
+        
+        global model
+        model = EnergyConsumptionModel(X_train.shape[2]).to(device)
+        criterion = nn.MSELoss()
+        optimizer = optim.Adam(model.parameters(), lr = lr)
+        scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.1, patience=5)
+        
+        predict = train_model(model, train_loader, criterion, optimizer, scheduler, epochs=20)
+        
+        model_name = "pytorch_prediction_model.pkl"
 
-# Importing dataset
-# Data available here : https://archive.ics.uci.edu/dataset/235/individual+household+electric+power+consumption
-household_power_consumption = pd.read_csv(
-    "household_power_consumption.txt",
-    sep = ";", parse_dates = {"datetime":["Date", "Time"]}, low_memory = False, 
-    na_values = ["nan", "?"])
+        joblib.dump(value = predict, filename = model_name)
+        mlflow.end_run()
 
-# Set datetime as index
-household_power_consumption.set_index("datetime", inplace = True)
+if __name__ == '__main__':
+    main()
 
-# Checking for NaN values
-household_power_consumption.isna().values.any()
+def load_dataset(dataset, frac_training = 0.8):
+    df = pd.read_csv(
+        dataset,
+        sep = ';', parse_dates = {'datetime':['Date', 'Time']}, low_memory = False, 
+        na_values = ['nan', '?']
+    )
 
-# Filling missing values
-household_power_consumption.interpolate(inplace = True)
+    df.set_index('datetime', inplace = True)
+    df.isna().values.any()
 
-# Normalizing variables
-scaler = MinMaxScaler()
-household_pc_scaled = scaler.fit_transform(household_power_consumption)
+    df.interpolate(inplace = True) # Filling missing values by interpolation
 
-# Putting normalized data in a DataFrame
-household_pc_scaled = pd.DataFrame(household_pc_scaled,
-                                   columns=household_power_consumption.columns, 
-                                   index=household_power_consumption.index)
+    scaler = MinMaxScaler()
+    scaled_data = scaler.fit_transform(df)
 
-# Splitting our sample
-household_pc_training = household_pc_scaled.sample(frac = 0.8, random_state = 123456)
-household_pc_validation = household_pc_scaled.drop(household_pc_training.index)
+    scaled_data = pd.DataFrame(scaled_data,
+        columns=df.columns, 
+        index=df.index
+    )
+    training = scaled_data.sample(frac = frac_training, random_state = 123456)
+    validation = scaled_data.drop(training.index)
+    
+    return training, validation
 
 # Creating sequences for time-series forecasting
 def create_sequences(data, seq_length):
-    """
+    '''
     _summary_
     This function creates sequences with a fixed length to use as input in a model.
     It allows us to use the past n (as set by seq_length) observations to predict the n+1 one.
@@ -56,62 +82,55 @@ def create_sequences(data, seq_length):
 
     Returns:
         np.array, np.array: two arrays containing the sequences
-    """    
+    '''    
     xs, ys = [], []
     for i in range(len(data) - seq_length):
         x = data.iloc[i:(i+seq_length)].values
-        y = data.iloc[i+seq_length]["Global_active_power"]
+        y = data.iloc[i+seq_length]['Global_active_power']
         xs.append(x)
         ys.append(y)
     return np.array(xs), np.array(ys)
 
-# Generating the sequences
-seq_n = 24
-X_train, y_train = create_sequences(household_pc_scaled.drop(household_pc_validation.index), seq_n)
-X_test, y_test = create_sequences(household_pc_validation, seq_n)
-
-# Converting data to PyTorch tensors
-X_train_tensors = torch.tensor(X_train, dtype=torch.float32).to(device)
-y_train_tensors = torch.tensor(y_train, dtype=torch.float32).to(device)
-X_test_tensors = torch.tensor(X_test, dtype=torch.float32).to(device)
-y_test_tensors = torch.tensor(y_test, dtype=torch.float32).to(device)
-
-# Creating data loaders
-hh_pc_train = TensorDataset(X_train_tensors, y_train_tensors)
-hh_pc_test = TensorDataset(X_test_tensors, y_test_tensors)
-train_loader = DataLoader(hh_pc_train, batch_size=64, shuffle=True)
-test_loader = DataLoader(hh_pc_test, batch_size=64, shuffle=False)
+def create_data_loaders(X_train, y_train, X_test, y_test):
+    X_train_tensors = torch.tensor(X_train, dtype=torch.float32).to(device)
+    y_train_tensors = torch.tensor(y_train, dtype=torch.float32).to(device)
+    X_test_tensors = torch.tensor(X_test, dtype=torch.float32).to(device)
+    y_test_tensors = torch.tensor(y_test, dtype=torch.float32).to(device)
+    train = TensorDataset(X_train_tensors, y_train_tensors)
+    test = TensorDataset(X_test_tensors, y_test_tensors)
+    train_loader = DataLoader(train, batch_size=64, shuffle=True)
+    test_loader = DataLoader(test, batch_size=64, shuffle=False)
+    return train_loader, test_loader
 
 # Model construction
 class EnergyConsumptionModel(nn.Module):
     def __init__(self, input_dim):
         super(EnergyConsumptionModel, self).__init__()
-        self.fc0 = nn.Linear(input_dim, 100)
-        self.fc1 = nn.Linear(100, 50)
-        self.lstm1 = nn.LSTM(50, 50, batch_first=True)
+        self.fc0 = nn.Linear(input_dim, 128)
+        self.fc1 = nn.Linear(128, 64)
+        self.lstm1 = nn.LSTM(64, 64, batch_first=True)
+        self.attention_fc = nn.Linear(64, 1)
         self.dropout = nn.Dropout(0.25)
-        self.bn = nn.BatchNorm1d(50)
-        self.fc2 = nn.Linear(50, 25)
-        self.fc3 = nn.Linear(25, 1)
-
+        self.bn = nn.BatchNorm1d(64)
+        self.fc2 = nn.Linear(64, 32)
+        self.fc3 = nn.Linear(32, 1)
+        
+    def attention(self, lstm_out):
+        weights = F.softmax(self.attention_fc(lstm_out), dim=1)
+        attended_output = (lstm_out * weights).sum(dim=1)
+        return attended_output
+    
     def forward(self, x):
         x = F.relu(self.fc0(x))
         x = F.relu(self.fc1(x))
         lstm_out, _ = self.lstm1(x)
-        lstm_out = lstm_out[:, -1, :] # Output extraction from LSTM layer
-        lstm_out = self.dropout(lstm_out)
-        lstm_out = self.bn(lstm_out)
-        x = F.relu(self.fc2(lstm_out))
+        attended_output = self.attention(lstm_out)
+        x = self.dropout(attended_output)
+        x = self.bn(x)
+        x = F.relu(self.fc2(x))
         out = self.fc3(x)
         return out
 
-# Initialization
-model = EnergyConsumptionModel(X_train.shape[2]).to(device)
-criterion = nn.MSELoss()
-optimizer = optim.Adam(model.parameters(), lr=0.001)
-scheduler = ReduceLROnPlateau(optimizer, "min", factor=0.1, patience=5)
-
-# Model training
 def train_model(model, train_loader, criterion, optimizer, scheduler, epochs = 20):
     model.train()
     for epoch in range(epochs):
@@ -124,13 +143,14 @@ def train_model(model, train_loader, criterion, optimizer, scheduler, epochs = 2
             optimizer.step()
             running_loss += loss.item()
         avg_loss = running_loss / len(train_loader)
-        print(f"Epoch {epoch+1}/{epochs}, Loss: {running_loss / len(train_loader)}")
+        mlflow.log_metric('avg_loss', avg_loss)
+        print(f'Epoch {epoch+1}/{epochs}, Loss: {running_loss / len(train_loader)}')
         scheduler.step(avg_loss)
+        with torch.inference_mode():
+            actuals, predictions, mse = get_model_metrics(model, test_loader)
+            mlflow.log_metric('mse', mse)
 
-train_model(model, train_loader, criterion, optimizer, scheduler, epochs=20)
-
-# Model evaluation
-def evaluate_model(model, test_loader):
+def get_model_metrics(model, test_loader):
     model.eval()
     predictions, actuals = [], []
     with torch.no_grad():
@@ -141,46 +161,46 @@ def evaluate_model(model, test_loader):
     predictions = np.concatenate(predictions)
     actuals = np.concatenate(actuals)
     mse = mean_squared_error(actuals, predictions)
-    print(f"Test MSE: {mse}")
+    print(f'Test MSE: {mse}')
     return actuals, predictions, mse
 
-actuals, predictions, mse = evaluate_model(model, test_loader)
+def compute_delta(start, end, chunk_size):
+    actuals, predictions, mse = get_model_metrics(model, test_loader)
+    delta = predictions - actuals
+    delta_slice = delta[start:end]
+    actuals_slice = actuals[start:end]
+    positive_delta = np.maximum(delta_slice, 0)
+    negative_delta = np.minimum(delta_slice, 0)
+    x_values = range(start, end)
 
-# Preparing the data for graphing
-delta = predictions - actuals
-x_start = 300_000
-x_end = 400_000
-delta_slice = delta[x_start:x_end]
-actuals_slice = actuals[x_start:x_end]
-positive_delta = np.maximum(delta_slice, 0)
-negative_delta = np.minimum(delta_slice, 0)
-x_values = range(x_start, x_end)
+    # Grouping data in chunks
+    num_chunks = len(delta_slice) // chunk_size
+    averaged_actuals = [np.mean(actuals_slice[i * chunk_size:(i+1) * chunk_size]) for i in range(num_chunks)]
+    averaged_deltas = [np.mean(delta_slice[i*chunk_size:(i+1)*chunk_size]) for i in range(num_chunks)]
+    averaged_positive_deltas = [np.mean(positive_delta[i * chunk_size:(i+1) * chunk_size]) for i in range(num_chunks)]
+    averaged_negative_deltas = [np.mean(negative_delta[i * chunk_size:(i+1) * chunk_size]) for i in range(num_chunks)]
+    x_values = range(start, start + num_chunks * chunk_size, chunk_size)
+    
+    return averaged_actuals, averaged_deltas, averaged_positive_deltas, averaged_negative_deltas, x_values
 
-# Grouping data in chunks
-chunk_size = 240
-num_chunks = len(delta_slice) // chunk_size
-averaged_actuals = [np.mean(actuals_slice[i * chunk_size:(i+1) * chunk_size]) for i in range(num_chunks)]
-averaged_deltas = [np.mean(delta_slice[i*chunk_size:(i+1)*chunk_size]) for i in range(num_chunks)]
-averaged_positive_deltas = [np.mean(positive_delta[i * chunk_size:(i+1) * chunk_size]) for i in range(num_chunks)]
-averaged_negative_deltas = [np.mean(negative_delta[i * chunk_size:(i+1) * chunk_size]) for i in range(num_chunks)]
-x_values = range(x_start, x_start + num_chunks * chunk_size, chunk_size)
+def plot_nn_loss(start, end, chunk_size = 360):
+    averaged_actuals, averaged_deltas, averaged_positive_deltas, averaged_negative_deltas, x_values = compute_delta(start, end, chunk_size = chunk_size)
+    plt.figure(figsize=(35, 6))
+    plt.bar(x_values, averaged_actuals, width = chunk_size, align='edge', label = f'Delta (averaged over {chunk_size} minutes)', color = 'dodgerblue')
+    plt.bar(x_values, averaged_positive_deltas, width = chunk_size, align='edge', bottom = averaged_actuals, label = 'Positive Delta', color = 'orange')
+    plt.bar(x_values, averaged_negative_deltas, width=chunk_size, align='edge', bottom=np.array(averaged_actuals) + np.array(averaged_positive_deltas), label='Negative Delta', color='red')
+    plt.legend()
+    plt.title('Energy Consumption Forecasting')
+    plt.xlabel('Time (in minutes)')
+    plt.ylabel('Delta in Energy Consumption')
+    plt.savefig('nn_loss.png')
 
-# Stacked barplot: Actuals +- Delta
-plt.figure(figsize=(35, 6))
-plt.bar(x_values, averaged_actuals, width = chunk_size, align="edge", label = f"Delta (averaged over {chunk_size} minutes)", color = "dodgerblue")
-plt.bar(x_values, averaged_positive_deltas, width = chunk_size, align="edge", bottom = averaged_actuals, label = "Positive Delta", color = "orange")
-plt.bar(x_values, averaged_negative_deltas, width=chunk_size, align="edge", bottom=np.array(averaged_actuals) + np.array(averaged_positive_deltas), label="Negative Delta", color="red")
-plt.legend()
-plt.title("Energy Consumption Forecasting")
-plt.xlabel("Time (in minutes)")
-plt.ylabel("Delta in Energy Consumption")
-plt.savefig("nn_loss.png")
-
-# Barplot: Delta
-plt.figure(figsize=(35, 6))
-plt.bar(x_values, averaged_deltas, width=chunk_size, align="edge", label=f"Delta (averaged over {chunk_size} minutes)")
-plt.legend()
-plt.title("Energy Consumption Forecasting")
-plt.xlabel("Time (in minutes)")
-plt.ylabel("Delta in Energy Consumption")
-plt.savefig("nn_loss.png")
+def plot_deltas(start, end, chunk_size = 360):
+    averaged_actuals, averaged_deltas, averaged_positive_deltas, averaged_negative_deltas, x_values = compute_delta(start, end)
+    plt.figure(figsize=(35, 6))
+    plt.bar(x_values, averaged_deltas, width=chunk_size, align='edge', label=f'Delta (averaged over {chunk_size} minutes)')
+    plt.legend()
+    plt.title('Energy Consumption Forecasting')
+    plt.xlabel('Time (in minutes)')
+    plt.ylabel('Delta in Energy Consumption')
+    plt.savefig('nn_loss.png')
