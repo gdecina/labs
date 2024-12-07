@@ -10,6 +10,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
 
 def main():
@@ -18,25 +19,26 @@ def main():
     mlflow.set_tracking_uri('http://127.0.0.1:5000')
     mlflow.set_experiment('household-energy-consumption')
     with mlflow.start_run():
-        lr = 0.01
+        lr = 0.001
         mlflow.log_metric('lr', lr)
     
-        training, validation = load_dataset('household_power_consumption.txt')
-        seq_n = 24
-        X_train, y_train = create_sequences(training, seq_n)
-        X_test, y_test = create_sequences(validation, seq_n)
+        data = load_dataset('household_power_consumption.txt')
+        seq_length = 64
+        X, y = create_sequences(data, seq_length)
+        
+        train_size = 0.8
         global train_loader, test_loader
-        train_loader, test_loader = create_data_loaders(X_train, y_train, X_test, y_test)
+        train_loader, test_loader = create_data_loaders(X, y, train_size)
         
         global model
-        model = EnergyConsumptionModel(X_train.shape[2]).to(device)
+        model = EnergyConsumptionModel(X.shape[2]).to(device)
         criterion = nn.MSELoss()
         optimizer = optim.Adam(model.parameters(), lr = lr)
         scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.1, patience=5)
         
         predict = train_model(model, train_loader, criterion, optimizer, scheduler, epochs=20)
         
-        model_name = "pytorch_prediction_model.pkl"
+        model_name = 'pytorch_prediction_model.pkl'
 
         joblib.dump(value = predict, filename = model_name)
         mlflow.end_run()
@@ -44,7 +46,7 @@ def main():
 if __name__ == '__main__':
     main()
 
-def load_dataset(dataset, frac_training = 0.8):
+def load_dataset(dataset):
     df = pd.read_csv(
         dataset,
         sep = ';', parse_dates = {'datetime':['Date', 'Time']}, low_memory = False, 
@@ -52,7 +54,6 @@ def load_dataset(dataset, frac_training = 0.8):
     )
 
     df.set_index('datetime', inplace = True)
-    df.isna().values.any()
 
     df.interpolate(inplace = True) # Filling missing values by interpolation
 
@@ -63,10 +64,7 @@ def load_dataset(dataset, frac_training = 0.8):
         columns=df.columns, 
         index=df.index
     )
-    training = scaled_data.sample(frac = frac_training, random_state = 123456)
-    validation = scaled_data.drop(training.index)
-    
-    return training, validation
+    return scaled_data
 
 # Creating sequences for time-series forecasting
 def create_sequences(data, seq_length):
@@ -91,7 +89,8 @@ def create_sequences(data, seq_length):
         ys.append(y)
     return np.array(xs), np.array(ys)
 
-def create_data_loaders(X_train, y_train, X_test, y_test):
+def create_data_loaders(X, y, train_size):
+    X_train, X_test, y_train, y_test = train_test_split(X, y, train_size = train_size)
     X_train_tensors = torch.tensor(X_train, dtype=torch.float32).to(device)
     y_train_tensors = torch.tensor(y_train, dtype=torch.float32).to(device)
     X_test_tensors = torch.tensor(X_test, dtype=torch.float32).to(device)
@@ -102,34 +101,62 @@ def create_data_loaders(X_train, y_train, X_test, y_test):
     test_loader = DataLoader(test, batch_size=64, shuffle=False)
     return train_loader, test_loader
 
-# Model construction
 class EnergyConsumptionModel(nn.Module):
     def __init__(self, input_dim):
         super(EnergyConsumptionModel, self).__init__()
         self.fc0 = nn.Linear(input_dim, 128)
         self.fc1 = nn.Linear(128, 64)
         self.lstm1 = nn.LSTM(64, 64, batch_first=True)
-        self.attention_fc = nn.Linear(64, 1)
+        self.attention_fc = nn.Linear(64, 64)
         self.dropout = nn.Dropout(0.25)
         self.bn = nn.BatchNorm1d(64)
         self.fc2 = nn.Linear(64, 32)
         self.fc3 = nn.Linear(32, 1)
         
-    def attention(self, lstm_out):
-        weights = F.softmax(self.attention_fc(lstm_out), dim=1)
-        attended_output = (lstm_out * weights).sum(dim=1)
-        return attended_output
+    def attention(self, input):
+        attention_scores = self.attention_fc(input)
+        attention_weights = F.softmax(attention_scores, dim=-1)  # Normalize along features
+        return attention_weights
     
     def forward(self, x):
         x = F.relu(self.fc0(x))
         x = F.relu(self.fc1(x))
+        
         lstm_out, _ = self.lstm1(x)
-        attended_output = self.attention(lstm_out)
-        x = self.dropout(attended_output)
+        attention_weights = self.attention(lstm_out)
+        
+        enhanced_features = attention_weights * lstm_out
+        enhanced_features = enhanced_features[:, -1, :]
+        
+        x = self.dropout(enhanced_features)
         x = self.bn(x)
+        
         x = F.relu(self.fc2(x))
         out = self.fc3(x)
         return out
+
+# Model construction
+# class EnergyConsumptionModel(nn.Module):
+#     def __init__(self, input_dim):
+#         super(EnergyConsumptionModel, self).__init__()
+#         self.fc0 = nn.Linear(input_dim, 100)
+#         self.fc1 = nn.Linear(100, 50)
+#         self.lstm1 = nn.LSTM(50, 50, batch_first=True)
+#         self.dropout = nn.Dropout(0.25)
+#         self.bn = nn.BatchNorm1d(50)
+#         self.fc2 = nn.Linear(50, 25)
+#         self.fc3 = nn.Linear(25, 1)
+
+#     def forward(self, x):
+#         x = F.relu(self.fc0(x))
+#         x = F.relu(self.fc1(x))
+#         lstm_out, _ = self.lstm1(x)
+#         lstm_out = lstm_out[:, -1, :] # Output extraction from LSTM layer
+#         lstm_out = self.dropout(lstm_out)
+#         lstm_out = self.bn(lstm_out)
+#         x = F.relu(self.fc2(lstm_out))
+#         out = self.fc3(x)
+#         return out
 
 def train_model(model, train_loader, criterion, optimizer, scheduler, epochs = 20):
     model.train()
@@ -143,12 +170,13 @@ def train_model(model, train_loader, criterion, optimizer, scheduler, epochs = 2
             optimizer.step()
             running_loss += loss.item()
         avg_loss = running_loss / len(train_loader)
-        mlflow.log_metric('avg_loss', avg_loss)
+        mlflow.log_metric('avg_loss', avg_loss, step = epoch)
         print(f'Epoch {epoch+1}/{epochs}, Loss: {running_loss / len(train_loader)}')
         scheduler.step(avg_loss)
+        mlflow.log_metric('lr', scheduler.get_last_lr()[0], step = epoch)
         with torch.inference_mode():
             actuals, predictions, mse = get_model_metrics(model, test_loader)
-            mlflow.log_metric('mse', mse)
+            mlflow.log_metric('mse', mse, step = epoch)
 
 def get_model_metrics(model, test_loader):
     model.eval()
@@ -196,7 +224,7 @@ def plot_nn_loss(start, end, chunk_size = 360):
     plt.savefig('nn_loss.png')
 
 def plot_deltas(start, end, chunk_size = 360):
-    averaged_actuals, averaged_deltas, averaged_positive_deltas, averaged_negative_deltas, x_values = compute_delta(start, end)
+    averaged_actuals, averaged_deltas, averaged_positive_deltas, averaged_negative_deltas, x_values = compute_delta(start, end, chunk_size)
     plt.figure(figsize=(35, 6))
     plt.bar(x_values, averaged_deltas, width=chunk_size, align='edge', label=f'Delta (averaged over {chunk_size} minutes)')
     plt.legend()
