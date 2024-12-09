@@ -15,7 +15,7 @@ from sklearn.metrics import mean_squared_error
 
 def main():
     global device
-    device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu') # Using acceleration on Mac
+    device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu') # Using hardware acceleration if on Mac
     mlflow.set_tracking_uri('http://127.0.0.1:5000')
     mlflow.set_experiment('household-energy-consumption')
     with mlflow.start_run():
@@ -36,11 +36,11 @@ def main():
         optimizer = optim.Adam(model.parameters(), lr = lr)
         scheduler = ReduceLROnPlateau(optimizer, 'min', factor=0.1, patience=5)
         
-        predict = train_model(model, train_loader, criterion, optimizer, scheduler, epochs=20)
+        train_model(model, train_loader, criterion, optimizer, scheduler, epochs=20)
         
-        model_name = 'pytorch_prediction_model.pkl'
+        model_name = 'pytorch_prediction_model.pth'
 
-        joblib.dump(value = predict, filename = model_name)
+        torch.save(obj = model.state_dict(), f = model_name)
         mlflow.end_run()
 
 if __name__ == '__main__':
@@ -105,13 +105,13 @@ class EnergyConsumptionModel(nn.Module):
     def __init__(self, input_dim):
         super(EnergyConsumptionModel, self).__init__()
         self.fc0 = nn.Linear(input_dim, 128)
-        self.fc1 = nn.Linear(128, 64)
-        self.lstm1 = nn.LSTM(64, 64, batch_first=True)
+        self.lstm1 = nn.LSTM(128, 64, batch_first=True)
+        self.lstm2 = nn.LSTM(64, 64, batch_first=True)
         self.attention_fc = nn.Linear(64, 64)
         self.dropout = nn.Dropout(0.25)
         self.bn = nn.BatchNorm1d(64)
-        self.fc2 = nn.Linear(64, 32)
-        self.fc3 = nn.Linear(32, 1)
+        self.fc1 = nn.Linear(64, 32)
+        self.fc2 = nn.Linear(32, 1)
         
     def attention(self, input):
         attention_scores = self.attention_fc(input)
@@ -120,9 +120,9 @@ class EnergyConsumptionModel(nn.Module):
     
     def forward(self, x):
         x = F.relu(self.fc0(x))
-        x = F.relu(self.fc1(x))
         
         lstm_out, _ = self.lstm1(x)
+        lstm_out, _ = self.lstm2(lstm_out)
         attention_weights = self.attention(lstm_out)
         
         enhanced_features = attention_weights * lstm_out
@@ -131,32 +131,9 @@ class EnergyConsumptionModel(nn.Module):
         x = self.dropout(enhanced_features)
         x = self.bn(x)
         
-        x = F.relu(self.fc2(x))
-        out = self.fc3(x)
+        x = F.relu(self.fc1(x))
+        out = self.fc2(x)
         return out
-
-# Model construction
-# class EnergyConsumptionModel(nn.Module):
-#     def __init__(self, input_dim):
-#         super(EnergyConsumptionModel, self).__init__()
-#         self.fc0 = nn.Linear(input_dim, 100)
-#         self.fc1 = nn.Linear(100, 50)
-#         self.lstm1 = nn.LSTM(50, 50, batch_first=True)
-#         self.dropout = nn.Dropout(0.25)
-#         self.bn = nn.BatchNorm1d(50)
-#         self.fc2 = nn.Linear(50, 25)
-#         self.fc3 = nn.Linear(25, 1)
-
-#     def forward(self, x):
-#         x = F.relu(self.fc0(x))
-#         x = F.relu(self.fc1(x))
-#         lstm_out, _ = self.lstm1(x)
-#         lstm_out = lstm_out[:, -1, :] # Output extraction from LSTM layer
-#         lstm_out = self.dropout(lstm_out)
-#         lstm_out = self.bn(lstm_out)
-#         x = F.relu(self.fc2(lstm_out))
-#         out = self.fc3(x)
-#         return out
 
 def train_model(model, train_loader, criterion, optimizer, scheduler, epochs = 20):
     model.train()
